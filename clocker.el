@@ -28,11 +28,17 @@
 (require 'projectile)
 (require 'spaceline)
 (require 'vc-git)
+(require 'f)
 
 ;;; Code:
 
 ;;;;;;;;;;;;;;;;;;;;
 ;; customizable variables
+
+(defface clocker-worklog-buffer-face
+  '((t nil))
+  "Default face for worklog buffer."
+  :group 'clocker)
 
 (defface clocker-mode-line-clock-in-face
   '((t (:foreground "white" :background "#F2686C" :inherit mode-line)))
@@ -44,6 +50,26 @@
 
 When this value is null, clocker won't infer org file names from
 branch names."
+  :group 'clocker)
+
+(defcustom clocker-worklog-display-alist
+  '((side . right)
+    (window-width . 35))
+  "Alist used to display worklog buffer.
+
+See `display-buffer-in-side-window' for example options.
+
+n.b. the special symbol `slot' added automatically to ensure that
+`side-notes-file' is displayed above `side-notes-secondary-file'."
+  :type 'alist
+  :group 'clocker)
+
+(defcustom clocker-open-file-extension ".worklog.org"
+  "How to find the org file"
+  :group 'clocker)
+
+(defcustom clocker-worklog-file-folder (expand-file-name "~/Dropbox/ORG/worklog/" )
+  "Where to store the real worklog file"
   :group 'clocker)
 
 (defcustom clocker-extra-annoying t
@@ -72,7 +98,7 @@ If a buffer has mode that belongs to this list, the
 `after-save-hook' won't do any checks if not clocked in"
   :group 'clocker)
 
-(defcustom clocker-skip-after-save-hook-on-file-name '("COMMIT_EDITMSG")
+(defcustom clocker-skip-after-save-hook-on-file-name '("COMMIT_EDITMSG" "recentf")
   "Holds file names that won't be affected by clocker's `after-save-hook'.
 
 If a buffer represents a file with a name that exists on this list, the
@@ -92,6 +118,19 @@ This variable will affect behavior once you are clocked-in, is
 particularly handy when you have more than one frame."
   :group 'clocker)
 
+(defcustom clocker-worklog-after-open-hook
+  nil
+  "Hook run after showing worklog buffer."
+  :type 'hook
+  :group 'clocker)
+
+(defcustom clocker-select-window
+  t
+  "If non-nil, switch to worklog window upon displaying it."
+  :type 'boolean
+  :safe 'booleanp
+  :group 'clocker)
+
 (defvar clocker-on-auto-save nil
   "Indicate if the current save is happening because of an auto-save.
 
@@ -99,6 +138,9 @@ This variable will be set to `t' when a callback registered in
 the `auto-save-hook' is called.  Once the clocker
 `after-save-hook' is called, this variable is going to be set to nil.")
 
+(defvar-local clocker-worklog-buffer-identify
+  nil
+  "Buffer local variable to identify a worklog buffer.")
 ;;;;;;;;;;;;;;;;;;;;
 ;; util
 
@@ -107,6 +149,35 @@ the `auto-save-hook' is called.  Once the clocker
   (and (fboundp 'org-clocking-p)
        (org-clocking-p)))
 
+(defun clocker-create-worklog-file (source link header)
+    (with-current-buffer
+      (create-file-buffer source)
+      (insert header)
+      (write-file source)
+      (f-symlink source link)))
+
+;;;###autoload
+(defun clocker-create-project-worklog ()
+  (interactive)
+  (if (projectile-project-p)
+      (let* ((root (projectile-project-root (buffer-file-name)))
+             (name (projectile-project-name root))
+             (folder clocker-worklog-file-folder)
+             (worklog-file-path (concat folder name clocker-open-file-extension))
+             (worklog-symlink-path (concat root name clocker-open-file-extension))
+             (hassyml? (f-symlink? worklog-symlink-path))
+             (hasworklog? (file-exists-p worklog-file-path)))
+        (cond ((and (not hassyml?) (not hasworklog?))
+               (clocker-create-worklog-file worklog-file-path worklog-symlink-path (concat "* " name))
+               (message (concat "Created worklog " worklog-file-path)))
+              ((and (not (f-symlink? worklog-symlink-path)) hasworklog?)
+               (message worklog-symlink-path)
+               (f-symlink worklog-file-path worklog-symlink-path))
+              ((and hassyml? (not hasworklog?))
+               (delete-file worklog-symlink-path)
+               (clocker-create-worklog-file worklog-file-path worklog-symlink-path (concat "* " name))
+               (message (concat "Created worklog " worklog-file-path)))))
+    (message "Not in a project")))
 
 (eval-after-load 'powerline
   '(spaceline-define-segment clocker-status
@@ -205,7 +276,8 @@ If START-DIR is not specified, starts in `default-directory`."
   "Lookup on directory tree for a file with an org extension.
 
 returns nil if it can't find any"
-  (clocker-locate-dominating-file "*.org"))
+  (clocker-create-project-worklog)
+  (clocker-locate-dominating-file (concat "*" clocker-open-file-extension)))
 
 ;;;;;;;;;;;;;;;;;;;;
 ;; find org file per-issue
@@ -262,10 +334,16 @@ With prefix arg SELECT, offer recently clocked tasks for selection."
                                (if clocker-search-org-buffer-in-all-frames
                                    t
                                  0))
-      (pop-to-buffer org-buffer
-                     t ;; display a new window with the org file
-                     t ;; don't put this navigation to the cache of visited buffers
-                     )
+      (display-buffer-in-side-window
+       org-buffer (cons (cons 'slot -1) clocker-worklog-display-alist))
+      (setq clocker-worklog-buffer-identify t)
+          (face-remap-add-relative 'default 'clocker-worklog-buffer-face)
+          (run-hooks 'clocker-worklog-after-open-hook)
+      ;; (pop-to-buffer org-buffer
+      ;;                t ;; display a new window with the org file
+      ;;                t ;; don't put this navigation to the cache of visited buffers
+      ;;                )
+      (select-window (get-buffer-window org-buffer (selected-frame)))
       (if (or (< m (point-min)) (> m (point-max))) (widen))
       (goto-char m)
       (org-show-entry)
@@ -275,7 +353,7 @@ With prefix arg SELECT, offer recently clocked tasks for selection."
       (if recent
           (message "No running clock, this is the most recently clocked task"))
       (run-hooks 'org-clock-goto-hook)
-      (other-window 1))))
+      (select-window (previous-window)))))
 
 ;;;;;;;;;;;;;;;;;;;;
 ;; main functions
@@ -308,6 +386,34 @@ tree hierarchy and finds the closest org file."
         (if file-orgfile
             (find-file file-orgfile)
           (message "clocker: could not find/infer org file.")))))))
+
+;;;###autoload
+(defun clocker-toggle-worklog (arg)
+  "Pop up a side window containing `side-notes-file'.
+
+When ARG is non-nil (if prefixed with \\[universal-argument]), locate
+`side-notes-secondary-file' instead.
+
+See `side-notes-display-alist' for options concerning displaying
+the notes buffer."
+  (interactive "P")
+  (if clocker-worklog-buffer-identify
+      (quit-window)
+    (let ((display-buffer-mark-dedicated t)
+          (buffer (find-file-noselect (clocker-find-dominating-org-file))))
+      (if (get-buffer-window buffer (selected-frame))
+          (delete-windows-on buffer (selected-frame))
+        (display-buffer-in-side-window
+         buffer (cons (cons 'slot (if arg 1 -1)) clocker-worklog-display-alist))
+        (with-current-buffer buffer
+          (setq clocker-worklog-buffer-identify t)
+          (face-remap-add-relative 'default 'clocker-worklog-buffer-face)
+          (run-hooks 'clocker-worklog-after-open-hook))
+        (if clocker-select-window
+            (select-window (get-buffer-window buffer (selected-frame))))
+        (message "Showing `%s'; %s to hide" buffer
+                 (key-description (where-is-internal this-command
+                                                     overriding-local-map t)))))))
 
 (defun clocker-save-hook (question-msg raise-exception)
   (interactive)
