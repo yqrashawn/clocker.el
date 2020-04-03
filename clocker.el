@@ -150,11 +150,12 @@ the `auto-save-hook' is called.  Once the clocker
        (org-clocking-p)))
 
 (defun clocker-create-worklog-file (source link header)
-    (with-current-buffer
-      (create-file-buffer source)
-      (insert header)
-      (write-file source)
-      (f-symlink source link)))
+  (let ((b (find-file-noselect source)))
+    (with-current-buffer b
+     (insert header)
+     (write-file source)
+     (f-symlink source link))
+    b))
 
 ;;;###autoload
 (defun clocker-create-project-worklog ()
@@ -163,19 +164,26 @@ the `auto-save-hook' is called.  Once the clocker
       (let* ((root (projectile-project-root (buffer-file-name)))
              (name (projectile-project-name root))
              (worklog-file-path (concat clocker-worklog-file-folder name clocker-open-file-extension))
-             (worklog-symlink-path (concat clocker-worklog-file-folder name clocker-open-file-extension))
-             (hassyml? (f-symlink? worklog-symlink-path))
-             (hasworklog? (file-exists-p worklog-file-path)))
-        (cond ((and (not hassyml?) (not hasworklog?))
-               (clocker-create-worklog-file worklog-file-path worklog-symlink-path (concat "* " name))
-               (message (concat "Created worklog " worklog-file-path)))
-              ((and (not (f-symlink? worklog-symlink-path)) hasworklog?)
-               (f-symlink worklog-file-path worklog-symlink-path))
-              ((and hassyml? (not hasworklog?))
-               (delete-file worklog-symlink-path)
-               (clocker-create-worklog-file worklog-file-path worklog-symlink-path (concat "* " name))
-               (message (concat "Created worklog " worklog-file-path)))))
-    (message "Not in a project")))
+             (worklog-buffer (get-file-buffer worklog-file-path)))
+        (or worklog-buffer
+            (let* ((worklog-symlink-path (concat root name clocker-open-file-extension))
+                   (hassyml? (f-symlink? worklog-symlink-path))
+                   (hasworklog? (file-exists-p worklog-file-path)))
+              (cond ((and (not hassyml?) (not hasworklog?))
+                     (message (concat "Created worklog " worklog-file-path))
+                     (clocker-create-worklog-file worklog-file-path worklog-symlink-path (concat "* " name)))
+                    ((and (not (f-symlink? worklog-symlink-path)) hasworklog?)
+                     (message worklog-file-path)
+                     (message worklog-symlink-path)
+                     (f-symlink worklog-file-path worklog-symlink-path)
+                     (create-file-buffer worklog-file-path))
+                    ((and hassyml? (not hasworklog?))
+                     (delete-file worklog-symlink-path)
+                     (message (concat "Created worklog " worklog-file-path))
+                     (clocker-create-worklog-file worklog-file-path worklog-symlink-path (concat "* " name)))
+                    ((and hassyml? hasworklog?)
+                     (find-file-noselect worklog-file-path))))))
+    (user-error "Not in a project")))
 
 (eval-after-load 'powerline
   '(spaceline-define-segment clocker-status
@@ -275,7 +283,8 @@ If START-DIR is not specified, starts in `default-directory`."
 
 returns nil if it can't find any"
   (clocker-create-project-worklog)
-  (clocker-locate-dominating-file (concat "*" clocker-open-file-extension)))
+  ;; (clocker-locate-dominating-file (concat "*" clocker-open-file-extension))
+  )
 
 ;;;;;;;;;;;;;;;;;;;;
 ;; find org file per-issue
@@ -398,11 +407,11 @@ the notes buffer."
   (if clocker-worklog-buffer-identify
       (quit-window)
     (let ((display-buffer-mark-dedicated t)
-          (buffer (find-file-noselect (clocker-find-dominating-org-file))))
+          (buffer (clocker-find-dominating-org-file)))
       (if (get-buffer-window buffer (selected-frame))
           (delete-windows-on buffer (selected-frame))
         (display-buffer-in-side-window
-         buffer (cons (cons 'slot (if arg 1 -1)) clocker-worklog-display-alist))
+         buffer (cons (cons 'slot -1) clocker-worklog-display-alist))
         (with-current-buffer buffer
           (setq clocker-worklog-buffer-identify t)
           (face-remap-add-relative 'default 'clocker-worklog-buffer-face)
@@ -423,11 +432,15 @@ the notes buffer."
     (let* ((current-file (buffer-file-name)))
       (when (and current-file
                  (clocker-should-perform-save-hook? current-file))
-
           (if (not (clocker-org-clocking-p))
               (progn
                 (y-or-n-p question-msg)
-                (clocker-open-org-file)
+                (when (not clocker-worklog-buffer-identify)
+                  (display-buffer-in-side-window
+                   (clocker-find-dominating-org-file)
+                   (cons (cons 'slot -1) clocker-worklog-display-alist)))
+                ;; (clocker-open-org-file)
+                ;; (clocker-toggle-worklog t)
                 (when raise-exception (throw 'clocker-clock-in t)))
             ;; else
             (when clocker-keep-org-file-always-visible
